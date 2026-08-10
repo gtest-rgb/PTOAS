@@ -68,13 +68,13 @@ struct PTOGraphSyncSolverPass
 
     // Derive the arch mode from the module's --pto-arch attribute (same
     // source as LoweringSyncToPipe / PTOA5NormalizeTMov / PTOPlanMemory).
-    // A2/A3 stay memory-based; A5 is register-based and lets
-    // handleBarrierConflict() drop the PIPE_V barrier that A5 hardware
-    // does not support.
-    const bool isA5 = pto::isTargetArchA5(func.getOperation());
+    // A2/A3 stay memory-based; A5 / Kirin9030 are register-based and let
+    // handleBarrierConflict() drop the PIPE_V barrier that hardware
+    // enforces without software barriers.
+    const bool isRegBased = pto::isRegBasedTargetArch(func.getOperation());
     SyncSolverOptions opts(SyncMode::INTRA_CORE_SYNC,
-                           /*isMemBasedArch=*/!isA5,
-                           /*isRegBasedArch=*/isA5);
+                           /*isMemBasedArch=*/!isRegBased,
+                           /*isRegBasedArch=*/isRegBased);
     opts.eventIdNumMax = eventIdNumMax;
     auto translator = std::make_unique<IRTranslator>(func, opts);
 

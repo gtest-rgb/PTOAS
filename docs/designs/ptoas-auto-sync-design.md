@@ -319,7 +319,7 @@ MLIR op，最终生成 `pto::SetFlagOp` / `pto::WaitFlagOp` / `pto::BarrierOp`�
        缺少 else region，会主动建一个空 else block（含 `scf::YieldOp`）作为锚点。
   2. `func.walk` 找到每个有挂载的 op：先以 `beforeInsert=true` 处理 `pipeBefore`，
      再以 `beforeInsert=false` 反向处理 `pipeAfter`，每个 sync 走 `SyncInsert`：
-     - `PIPE_BARRIER*` → `CreateBarrierOp`，A5 上 `PIPE_V` barrier 不生成、
+     - `PIPE_BARRIER*` → `CreateBarrierOp`，A5/Kirin9030 上 `PIPE_V` barrier 不生成、
        `PIPE_ALL` 推迟到尾部，相邻同类 barrier 通过 `hasNeighborBarrier` 去重；
      - `eventIds.size()==1` → `CreateSetWaitOpForSingleBuffer`：
        直接构造 `pto::SetFlagOp` / `pto::WaitFlagOp`（`isSyncWaitType()` 区分）；

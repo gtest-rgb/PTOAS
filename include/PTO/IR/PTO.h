@@ -99,6 +99,11 @@ bool isTargetArchA3(Operation *op);
 bool isTargetArchA5(Operation *op);
 bool isTargetArchKirin9030(Operation *op);
 
+/// Register-based architectures (A5 / Kirin9030): Vector same-pipe ordering is
+/// hardware-enforced, so software must not emit `pipe_barrier(PIPE_V)`.
+bool isRegBasedTargetArch(ModuleOp module);
+bool isRegBasedTargetArch(Operation *op);
+
 enum class PTOParserTargetArch {
   Unspecified,
   A3,

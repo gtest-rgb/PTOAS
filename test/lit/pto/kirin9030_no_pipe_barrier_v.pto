@@ -1,0 +1,35 @@
+// RUN: ptoas --pto-arch=kirin9030 --enable-insert-sync %s -o - 2>&1 | FileCheck %s --check-prefix=INSERT
+// RUN: ptoas --pto-arch=kirin9030 %s -o - 2>&1 | FileCheck %s --check-prefix=BARRIER
+
+// Kirin9030 Vector same-pipe ordering is hardware-enforced: software must not
+// emit pipe_barrier(PIPE_V) for dependent PIPE_V ops, and explicit
+// barrier_sync[TVEC] / pto.barrier <PIPE_V> must be dropped (same as A5).
+
+module {
+  // INSERT-LABEL: AICORE void dependent_vector_ops(
+  // INSERT: TADD(
+  // INSERT-NOT: pipe_barrier(PIPE_V);
+  // INSERT: TADD(
+  // INSERT: pipe_barrier(PIPE_ALL);
+  func.func @dependent_vector_ops() {
+    %ub0 = memref.alloc() : memref<16x16xf16, #pto.address_space<vec>>
+    %ub1 = memref.alloc() : memref<16x16xf16, #pto.address_space<vec>>
+
+    pto.tadd ins(%ub0, %ub0 : memref<16x16xf16, #pto.address_space<vec>>,
+                             memref<16x16xf16, #pto.address_space<vec>>)
+             outs(%ub0 : memref<16x16xf16, #pto.address_space<vec>>)
+    pto.tadd ins(%ub0, %ub0 : memref<16x16xf16, #pto.address_space<vec>>,
+                             memref<16x16xf16, #pto.address_space<vec>>)
+             outs(%ub1 : memref<16x16xf16, #pto.address_space<vec>>)
+    return
+  }
+
+  // BARRIER-LABEL: AICORE void explicit_vector_barrier(
+  // BARRIER-NOT: pipe_barrier(PIPE_V);
+  // BARRIER: pipe_barrier(PIPE_MTE2);
+  func.func @explicit_vector_barrier() {
+    pto.barrier_sync[<TVEC>]
+    pto.barrier_sync[<TLOAD>]
+    return
+  }
+}

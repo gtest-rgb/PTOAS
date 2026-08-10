@@ -283,9 +283,9 @@ void SyncCodegen::SyncInsert(IRRewriter &rewriter, Operation *op,
 // [核心修改] 加强版 CreateBarrierOp
 void SyncCodegen::CreateBarrierOp(IRRewriter &rewriter, Operation *op,
                                   SyncOperation *sync, bool beforeInsert) {
-  // A5: PIPE_V intra-pipe ordering is guaranteed by hardware; do not emit
-  // explicit vector barrier (it is also rejected by backend checks).
-  if (isTargetArchA5(func_.getOperation()) &&
+  // A5 / Kirin9030: PIPE_V intra-pipe ordering is guaranteed by hardware; do
+  // not emit explicit vector barrier (it is also rejected by backend checks).
+  if (isRegBasedTargetArch(func_.getOperation()) &&
       sync->GetActualSrcPipe() == PipelineType::PIPE_V) {
     return;
   }

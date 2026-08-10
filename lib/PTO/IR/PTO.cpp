@@ -292,6 +292,16 @@ bool mlir::pto::isTargetArchKirin9030(Operation *op) {
   return getTargetArch(op) == PTOArch::Kirin9030;
 }
 
+bool mlir::pto::isRegBasedTargetArch(ModuleOp module) {
+  auto arch = getTargetArch(module);
+  return arch == PTOArch::A5 || arch == PTOArch::Kirin9030;
+}
+
+bool mlir::pto::isRegBasedTargetArch(Operation *op) {
+  auto arch = getTargetArch(op);
+  return arch == PTOArch::A5 || arch == PTOArch::Kirin9030;
+}
+
 static llvm::TypeSize getOneByteTypeSize() {
   return llvm::TypeSize::getFixed(8);
 }

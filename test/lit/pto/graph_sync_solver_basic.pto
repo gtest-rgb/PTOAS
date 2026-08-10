@@ -1,4 +1,5 @@
 // RUN: ptoas --pto-level=level3 --pto-arch a5 --enable-graph-sync-solver --graph-sync-solver-event-id-max=8 --emit-pto-ir %s | FileCheck %s
+// RUN: ptoas --pto-level=level3 --pto-arch kirin9030 --enable-graph-sync-solver --graph-sync-solver-event-id-max=8 --emit-pto-ir %s | FileCheck %s
 
 // Three minimal regression cases for the graph-based intra-core sync solver.
 // We emit PTO MLIR (rather than C++) via --emit-pto-ir so the CHECK
@@ -83,8 +84,8 @@ module {
 // Case 2: Two consecutive vector ops writing/reading the same tile.
 //
 // Both producer and consumer are on PIPE_V, so the candidate sync collapses
-// into the `handleBarrierConflict` path. On A5 (register-based) PIPE_V
-// same-pipe sequencing is enforced by hardware, so the solver drops the
+// into the `handleBarrierConflict` path. On A5 / Kirin9030 (register-based)
+// PIPE_V same-pipe sequencing is enforced by hardware, so the solver drops the
 // PIPE_V barrier. Only the MTE2->V sync from the preceding tload remains
 // between the load and the first tmuls; nothing is emitted between the two
 // tmuls.

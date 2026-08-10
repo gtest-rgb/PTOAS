@@ -9,6 +9,8 @@
 - 使用 `--pto-arch=kirin9030` 指定目标架构
 - 需要安装 CANN@Kirin 工具包获取 bisheng 编译器
 - 编译 kernel 时需指定 `--cce-aicore-arch=dav-l311`
+- Vector 同管道时序由硬件保证，自动插同步 / Graph Sync Solver **不会**生成
+  `pipe_barrier(PIPE_V)`（与 A5 一致）
 
 完整流程分为以下阶段：
 

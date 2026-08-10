@@ -224,7 +224,7 @@ process_one_dir() {
   target_arch_lc="$(printf '%s' "$target_arch" | tr '[:upper:]' '[:lower:]')"
   local expected_vec_barrier="pipe_barrier(PIPE_V)"
   local skip_vec_barrier=0
-  if [[ "${target_arch_lc}" == "a5" ]]; then
+  if [[ "${target_arch_lc}" == "a5" || "${target_arch_lc}" == "kirin9030" ]]; then
     skip_vec_barrier=1
   fi
 
@@ -564,7 +564,7 @@ process_one_dir() {
     if [[ "$base" == "test_inject_sync_intra_pipe_barrier" ]]; then
       if [[ "${skip_vec_barrier}" == "1" ]]; then
         if grep -Fq "pipe_barrier(PIPE_V)" "$cpp"; then
-          echo -e "${A}(${base}.py)\tFAIL\tunexpected pipe_barrier(PIPE_V) on A5"
+          echo -e "${A}(${base}.py)\tFAIL\tunexpected pipe_barrier(PIPE_V) on A5/Kirin9030"
           overall=1
           continue
         fi
@@ -812,7 +812,7 @@ process_one_dir() {
       fi
       if [[ "${skip_vec_barrier}" == "1" ]]; then
         if grep -Fq "pipe_barrier(PIPE_V)" "$cpp"; then
-          echo -e "${A}(${base}.py)\tFAIL\tunexpected pipe_barrier(PIPE_V) lowering for barrier_sync[TVEC] on A5"
+          echo -e "${A}(${base}.py)\tFAIL\tunexpected pipe_barrier(PIPE_V) lowering for barrier_sync[TVEC] on A5/Kirin9030"
           overall=1
           continue
         fi
@@ -1387,7 +1387,7 @@ PY
       if [[ "$base" == "test_inject_sync_intra_pipe_barrier" ]]; then
         if [[ "${skip_vec_barrier}" == "1" ]]; then
           if grep -Fq "pipe_barrier(PIPE_V)" "$cpp"; then
-            echo -e "${A}(${base}.pto)\tFAIL\tunexpected pipe_barrier(PIPE_V) on A5"
+            echo -e "${A}(${base}.pto)\tFAIL\tunexpected pipe_barrier(PIPE_V) on A5/Kirin9030"
             overall=1
             continue
           fi

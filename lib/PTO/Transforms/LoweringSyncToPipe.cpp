@@ -102,8 +102,9 @@ struct BarrierSyncLowering : public OpRewritePattern<BarrierSyncOp> {
       return failure();
     }
 
-    // A5: TVEC single-pipe barrier is unnecessary/unsupported.
-    if (pipe == PIPE::PIPE_V && isTargetArchA5(op.getOperation())) {
+    // A5 / Kirin9030: TVEC single-pipe barrier is unnecessary/unsupported;
+    // Vector same-pipe ordering is hardware-enforced.
+    if (pipe == PIPE::PIPE_V && isRegBasedTargetArch(op.getOperation())) {
       rewriter.eraseOp(op);
       return success();
     }
@@ -120,7 +121,7 @@ struct BarrierLegalizeForArch : public OpRewritePattern<BarrierOp> {
 
   LogicalResult matchAndRewrite(BarrierOp op,
                                 PatternRewriter &rewriter) const override {
-    if (isTargetArchA5(op.getOperation()) &&
+    if (isRegBasedTargetArch(op.getOperation()) &&
         op.getPipe().getPipe() == PIPE::PIPE_V) {
       rewriter.eraseOp(op);
       return success();
