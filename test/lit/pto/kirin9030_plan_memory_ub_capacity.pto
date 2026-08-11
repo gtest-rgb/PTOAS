@@ -1,0 +1,101 @@
+// RUN: not ptoas --pto-arch=kirin9030 --pto-level=level3 %s 2>&1 | FileCheck %s --check-prefix=OVERFLOW
+// RUN: ptoas --pto-arch=a3 --pto-level=level3 %s >/dev/null
+
+// Kirin9030 UB is 128KB (1048576 bits). Each buffer is 16*16*16*f16 = 8192 bytes.
+// 17 simultaneously live buffers need 139264 bytes and must overflow on Kirin9030,
+// while still fitting in A3's 192KB UB.
+
+module {
+  // OVERFLOW: vec overflow
+  func.func @kirin9030_ub_overflow(%arg0: memref<16x16x16xf16, #pto.address_space<gm>>,
+                                   %arg1: memref<16x16x16xf16, #pto.address_space<gm>>) {
+    %u0 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u1 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u2 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u3 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u4 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u5 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u6 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u7 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u8 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u9 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u10 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u11 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u12 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u13 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u14 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u15 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+    %u16 = memref.alloc() : memref<16x16x16xf16, #pto.address_space<vec>>
+
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u0 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u1 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u2 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u3 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u4 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u5 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u6 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u7 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u8 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u9 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u10 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u11 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u12 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u13 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u14 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u15 : memref<16x16x16xf16, #pto.address_space<vec>>)
+    pto.tload ins(%arg0 : memref<16x16x16xf16, #pto.address_space<gm>>)
+             outs(%u16 : memref<16x16x16xf16, #pto.address_space<vec>>)
+
+    pto.tstore ins(%u0 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u1 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u2 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u3 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u4 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u5 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u6 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u7 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u8 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u9 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u10 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u11 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u12 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u13 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u14 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u15 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    pto.tstore ins(%u16 : memref<16x16x16xf16, #pto.address_space<vec>>)
+              outs(%arg1 : memref<16x16x16xf16, #pto.address_space<gm>>)
+    return
+  }
+}

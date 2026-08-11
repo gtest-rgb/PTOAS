@@ -3,6 +3,7 @@ build/
 install/
 cmake-build-*/
 CMakeFiles/
+.superpowers/
 CMakeCache.txt
 CMakeScripts/
 Testing/

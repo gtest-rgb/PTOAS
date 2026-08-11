@@ -11,6 +11,19 @@
 - 编译 kernel 时需指定 `--cce-aicore-arch=dav-l311`
 - Vector 同管道时序由硬件保证，自动插同步 / Graph Sync Solver **不会**生成
   `pipe_barrier(PIPE_V)`（与 A5 一致）
+- 本地内存容量与对齐不同于 A3/A5（见下表）
+
+Kirin9030 本地内存规格（`PTOPlanMemory` / `--pto-arch=kirin9030`）：
+
+| 空间 | 容量 | 对齐 |
+|------|------|------|
+| UB (VEC) | 128KB | 32B |
+| L1 (MAT) | 512KB | 32B |
+| L0A (LEFT) | 32KB | 512B |
+| L0B (RIGHT) | 32KB | 512B |
+| L0C (ACC) | 64KB | 512B |
+| Bias | 1KB | 64B |
+| FBuffer (SCALING) | 7KB | 128B |
 
 完整流程分为以下阶段：
 

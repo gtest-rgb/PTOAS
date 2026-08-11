@@ -53,8 +53,12 @@ constexpr int kSingleBufferCount = 1;
 constexpr int kDoubleBufferCount = 2;
 constexpr int64_t kA5VecLocalMemBits = 2031616;
 constexpr int64_t kA3VecLocalMemBits = 1572864;
+// Kirin9030 UB = 128KB.
+constexpr int64_t kKirin9030VecLocalMemBits = 1048576;
 constexpr int64_t kMatLocalMemBits = 4194304;
 constexpr int64_t kLocalMemAlignmentBytes = 256;
+constexpr int64_t kKirin9030VecAlignBytes = 32;
+constexpr int64_t kKirin9030MatAlignBytes = 32;
 
 struct LocalMemSpec {
   int64_t capacityBits = 0;
@@ -76,13 +80,19 @@ static int64_t alignUpBytes(int64_t value, int64_t align) {
 }
 
 static LocalMemSpec getLocalMemSpec(Operation *op, AddressSpace as) {
+  const bool isKirin9030 = isTargetArchKirin9030(op);
+  const bool isA5 = isTargetArchA5(op);
   switch (as) {
   case AddressSpace::VEC:
-    return isTargetArchA5(op)
-               ? LocalMemSpec{kA5VecLocalMemBits, kLocalMemAlignmentBytes}
-               : LocalMemSpec{kA3VecLocalMemBits, kLocalMemAlignmentBytes};
+    if (isKirin9030)
+      return LocalMemSpec{kKirin9030VecLocalMemBits, kKirin9030VecAlignBytes};
+    if (isA5)
+      return LocalMemSpec{kA5VecLocalMemBits, kLocalMemAlignmentBytes};
+    return LocalMemSpec{kA3VecLocalMemBits, kLocalMemAlignmentBytes};
   case AddressSpace::MAT:
-    return LocalMemSpec{kMatLocalMemBits, kLocalMemAlignmentBytes};
+    return isKirin9030
+               ? LocalMemSpec{kMatLocalMemBits, kKirin9030MatAlignBytes}
+               : LocalMemSpec{kMatLocalMemBits, kLocalMemAlignmentBytes};
   default:
     return LocalMemSpec{};
   }
@@ -2146,12 +2156,18 @@ LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
     int scalingSpaceSize;
   };
 
+  // Capacities are stored in bits; alignments are in bytes.
   const MemSpec kA3 = {
       1572864, 4194304, 524288, 524288, 1048576, 256, 256,
       4096,    4096,    4096,   256,    524288, 256, 1572864};
   const MemSpec kA5 = {
       2031616, 4194304, 524288, 524288, 2097152, 256, 256,
       4096,    4096,    4096,   256,    524288, 256, 2031616};
+  // Kirin9030: UB 128KB, L1 512KB, L0A/B 32KB, L0C 64KB, Bias 1KB, FBuffer 7KB.
+  // Align: UB/L1 32B, L0A/B/C 512B, Bias 64B, Scaling 128B.
+  const MemSpec kKirin9030 = {
+      1048576, 4194304, 262144, 262144, 524288, 32, 32,
+      512,     512,     512,    64,     8192,   128, 57344};
 
   auto applySpec = [this](const MemSpec &spec) {
     ubSpaceSize = spec.ubSpaceSize;
@@ -2175,9 +2191,12 @@ LogicalResult MemPlan::InitMemSpecsFromModule(func::FuncOp funcOp) {
 
   // --pto-arch options:
   // a3 -> default memory spec
-  // a5 -> override memory spec
-  if (isTargetArchA5(getTopLevelModuleOp(funcOp))) {
+  // a5 / kirin9030 -> override memory spec
+  ModuleOp module = getTopLevelModuleOp(funcOp);
+  if (isTargetArchA5(module)) {
     applySpec(kA5);
+  } else if (isTargetArchKirin9030(module)) {
+    applySpec(kKirin9030);
   }
   return success();
 }
