@@ -121,13 +121,19 @@ $PTO_SOURCE_DIR/build/tools/ptoas/ptoas ./tmatmulk.pto -o ./tmatmulk.cpp
 
 # 上板脚本使用仓库根相对路径，先回到根目录：
 cd $PTO_SOURCE_DIR
-# A2/A3：
+# A2/A3 示例：
 python3 test/npu_validation/scripts/generate_testcase.py \
   --input test/samples/MatMul/tmatmulk.cpp \
   --run-mode npu \
   --soc-version Ascend910B1
 
-# A5：把 --soc-version 换成 Ascend950，并给 ptoas 加上 --pto-arch=a5
+# A5 示例（ptoas 需加 --pto-arch=a5）：
+python3 test/npu_validation/scripts/generate_testcase.py \
+  --input test/samples/MatMul/tmatmulk.cpp \
+  --run-mode npu \
+  --soc-version Ascend950
+
+# 2) 运行验证（run.sh 无需额外参数）
 test/samples/MatMul/npu_validation/tmatmulk/run.sh
 ```
 
