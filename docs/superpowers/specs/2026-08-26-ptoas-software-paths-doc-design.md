@@ -45,7 +45,7 @@ PTOAS 当前存在多条"软件路径"，分散在 README、多篇 docs、CLI �
 - `--enable-inject-barrier-all-sync`：保守的 `barrier_all` 插入
 - `--enable-graph-sync-solver`：实验性图同步求解器（可用 `--graph-sync-solver-event-id-max` 调节）
 
-注意：含 `pto.tassign` 的模块禁止使用任何自动同步选项（`ptoas.cpp` 约 1359–1368 行有显式检查）。
+注意：含 `pto.tassign` 的模块禁止使用任何自动同步选项（`ptoas.cpp` 约 1359–1368 行有显式检查），且 `pto.tassign` 要求 `--pto-level=level3`（`ptoas.cpp` 约 1338–1342 行）。
 
 ### 2.5 端到端落地/验证路径（5 条）
 
@@ -77,6 +77,8 @@ AssignDefaultFrontendPipeId → LowerFrontendPipeOps → InferValidatePipeInit
 - 路径：`docs/ptoas-software-paths_zh.md`
 - 中文，命名与 `docs/` 下现有 `*_zh.md` 文档一致
 - 导览级：正文控制在约 200 行以内；细节一律链接到 README 与现有专题文档，不复制内容
+- 不改动 README：新文档通过 `docs/` 目录被发现（用户已明确选择新建文档而非 README 章节）
+- 篇幅优先级（如需裁剪）：全景图与选用指南优先保留，维度速查其次，附录可精简
 
 ### 3.2 结构（混合式：全景图 + 维度速查 + 选用指南）
 
