@@ -4,7 +4,7 @@
 
 ## 引言
 
-本文档面向新加入团队的开发者，梳理 PTOAS 编译器从源码入口到产物输出的端到端管线：涵盖前端接入、公共编译阶段、两条后端路径（`emitc` 与 `vpto`）的分叉与汇合、运行时调用与上板验证，以及最终发布形态。阅读本文后，读者应能回答"一个 kernel 从写出到跑通，中间经历了什么"这一问题，并能据此定位自己感兴趣的模块在整条管线中的位置。
+本文档面向新加入团队的开发者，梳理 PTOAS 编译器从源码入口到产物输出的端到端管线：涵盖前端接入、公共编译阶段、两条后端路径（`emitc` 与 `vpto`）的分叉与汇合、运行时调用与上板验证，以及最终发布形态。阅读本文后，读者应能回答"一个 kernel 从写出到跑通，中间经历了什么"这一问题，并能据此定位自己感兴趣的模块在整条管线中的位置；也能分清一份 `.pto` 里的 tile 级 PTO、VMI、VPTO 微指令如何共存、各层支持范围、哪一层能喂 EmitC、哪一层必须走 vpto（3.2.1 / 3.2.2 / 6.6 / 6.7）。
 
 ### 配套阅读
 
@@ -20,10 +20,10 @@
 
 1. 总览（PTOAS 定位、软件栈位置、两后端一图流）
 2. 入口与驱动（tools/ptoas/ CLI 驱动、选项分派）
-3. 前端入口（PTODSL、TileLang、PyPTO、.pto 文本/PTOBC）
+3. 前端入口（PTODSL、TileLang、PyPTO、.pto 文本/PTOBC；3.2.1 三层 IR / 3.2.2 支持范围）
 4. 公共阶段（解析/验证、Pass 管线编排、level 分档）
 5. 后端分叉（5.1 EmitC 路径 / 5.2 VPTO 路径含 VMI 层 / 5.3 mix-backend）
-6. 路径对比总表（arch × backend × level 矩阵）
+6. 路径对比总表（arch × backend × level 矩阵；6.6 IR 层 × 后端；6.7 三层能力）
 7. 运行时与上板（pto-isa 调用、npu_validation、fatobj 链接）
 8. 发布形态（ptoas wheel / ptoas-vmi wheel / tarball）
 9. 新开发者上手建议
@@ -236,9 +236,9 @@ ptoas 在整个 PTO 软件栈中处于"前端 DSL 与下游工具链之间"的�
 
 | 概念 | 一句话说明 |
 | --- | --- |
-| PTO IR | ptoas 的输入与核心中间表示：以 MLIR `ModuleOp` 为载体、`pto.*` dialect 表达的 tile 级算子程序，来自 `.pto` 文本解析或 PTOBC 解码。 |
+| PTO IR | ptoas 的输入与核心中间表示：**一个** MLIR 方言 `pto`（不是三个 dialect）。tile 级、VMI、VPTO 微指令都是这个 dialect 里的不同粒度层，写在同一份 `.pto` / 同一个 `ModuleOp` 里。走哪条后端只看 `--pto-backend`（见 3.2.1 / 6.6）；各层能表达什么见 3.2.2 / 6.7。tile **不会**自动降到 VMI（3.2.1）。 |
 | VMI | VPTO 后端内部的虚拟向量指令层（`pto.vmi.*`）：表达"逻辑向量"语义，由 layout assignment 决定如何映射到物理 vector register；不是独立的 CLI 后端。 |
-| VPTO | VPTO 后端的目标虚拟指令集（PTO micro Instruction）：向量执行导向，vpto 路径最终将其 lower 为 LLVM IR 再交 BiSheng 生成设备代码。 |
+| VPTO | 两层含义不要混：① **微指令 IR**（`pto.vdup` / `pto.vlds` / `pto.vsts` 等，类型 `!pto.vreg` / `!pto.mask`）；② **CLI 后端名** `--pto-backend=vpto`。vpto 路径把上述 IR lower 为 LLVM IR 再交 BiSheng。 |
 | fatobj | 含设备侧代码（及 host stub）的 fat object 文件，是 `-o` 的对象类产物；vpto 单后端与 mix 模式都产出 fatobj。 |
 | PTOBC | PTO Bytecode：`.pto` 文本的二进制序列化格式，文件头 magic 为 `"PTOBC\0"`，由 `decodePTOBCModule` 解码。 |
 
@@ -417,6 +417,206 @@ func.func private @trelu_arg(%src: !pto.tile_buf<vec, 1x16xf32>, %dst: !pto.tile
 
 **输出形态（对 driver 而言的下游）。** 两条分支汇合成统一的 PTO IR `ModuleOp`，随即进入第 4 章的公共阶段。文本与 PTOBC 之外还有一个配套工具值得知道：`tools/ptobc/` 提供独立 CLI（`tools/ptobc/src/main.cpp:126`）做文本↔二进制 roundtrip，测试数据在 `tools/ptobc/testdata/`——新开发者想看某个 `.pto` 的二进制形态，用它转一次即可。
 
+同一份 `.pto` **不是只能写 tile 级算子**。下面 3.2.1 把「文件里可以同时出现哪几层 IR、它们怎么汇合、哪一层能喂 emitc / vpto」单独写清；3.2.2 写各层支持范围。3.3 的 PTODSL 例子里 `pto.tile.load` 与 `pto.vlds` 同函数出现，就是这种混写的前端形态。
+
+### 3.2.1 `.pto` 内的三层 IR（tile 级 PTO、VMI、VPTO 微指令）
+
+**输入形态。** `.pto` 是 MLIR 通用文本，解析器不按「这是 VMI 文件还是 tile 文件」分派：一律 `parseTextualModule`（`tools/ptoas/driver.cpp:187`）。三层都挂在同一个 PTO dialect 上，只是 **op / 类型前缀不同**：
+
+| 层 | 典型写法 | 类型 | 仓库里的现成语料 |
+| --- | --- | --- | --- |
+| Tile 级 PTO | `pto.tadd` / `pto.tload` / `pto.tmatmul` | `!pto.tile_buf<…>`、`!pto.tensor_view` | `test/lit/pto/`、`test/tilelang_st/`（3.2 / 3.5） |
+| VMI | `pto.vmi.vadd` / `pto.vmi.vload` / `pto.vmi.vbrc` | `!pto.vmi.vreg<NxT>`、`!pto.vmi.mask`（mnemonic `vmi.vreg` / `vmi.mask`，`include/PTO/IR/VMITypeDefs.td:18-39`） | `test/lit/vmi_new/`、`test/vpto/cases/vmi_new/` |
+| VPTO 微指令 | `pto.vadd` / `pto.vlds` / `pto.vsts` / `pto.vecscope` | 物理 `!pto.vreg` / `!pto.mask`（**没有** `vmi.` 前缀） | `--emit-vpto` 的出口；也可手写。TileOps 模板展开后也是这一层（`include/PTO/Transforms/Passes.td:564-571`） |
+
+**三层都是 PTO IR。** 它们不是三个独立 dialect，也不是三种文件格式。方言名是 `pto`（`include/PTO/IR/PTODialect.td:25-32`）；全部 op 都走 `PTO_Op` → `Op<PTO_Dialect, …>`（`include/PTO/IR/PTOOps.td:73-74`）。`PTOOps.td:76-78` 把 `VMIOps.td` 与 `VPTOOps.td` **include 进同一个 dialect**：
+
+- VMI 只是 mnemonic 带前缀：`PTO_Op<"vmi." # mnemonic>`，印出来是 `pto.vmi.vadd`（`include/PTO/IR/VMIOps.td:42-44`）。
+- VPTO 微指令没有第二前缀：`pto.vadd` / `pto.vlds`，类是 `PTO_MicroOp`（`include/PTO/IR/VPTOOps.td:142-144`）。
+
+口头上的「PTO IR」在本文里指这份 `pto` dialect 的整体（包括三层）。不要把它理解成「只有 tile 级才叫 PTO IR」。也不要把 **CLI 后端名** `--pto-backend=vpto` 当成另一种 IR：那是编译路径。VMI 也不是第三后端。
+
+走哪条后端 **只看** `--pto-backend`（或 mix 子模块的 `pto.backend`），不看文件扩展名。`--emit-vpto` 只是 VPTO 后端的一种文本出口（5.2.4），不是第三后端。
+
+**处理（三层如何配合）。** 它们是 VPTO 管线里的前后站，不是并列 ISA。`runVPTOBackendPipeline`（`tools/ptoas/ptoas.cpp:3271-3292`）的顺序把汇合点钉死：
+
+```text
+.pto 里可以同时有：
+
+  pto.tadd          ──ExpandTileOp──►  pto.vlds / pto.vadd / pto.vsts
+  pto.vmi.vadd      ──VMI pipeline──►  pto.vadd（可能 1 条变 N 条）
+  pto.vadd          ──────────────►  已经是物理 VPTO，后面校验 / 发射
+                                              │
+                                              ▼
+                                    fatobj / --emit-vpto 打印
+```
+
+对应代码步骤：
+
+1. 若还有待展开 tile op → `lowerPTOToVPTOBackend`（`ptoas.cpp:3280-3282`）里的 `ExpandTileOp`（`ptoas.cpp:3166`）。模板函数体是 **物理 VPTO 微指令**（`pto.vecscope` / `pto.vlds` / `pto.vadd` / `pto.vsts`，`Passes.td:564-571`），**不是** `pto.vmi.*`。A2/A3 在 `LowerPTOToUBufOps` 后提前 `return`（`ptoas.cpp:3157-3163`），不走这次展开。
+2. inline（`ptoas.cpp:3289-3290`），让 private helper 进入同一次 layout 决策。
+3. **总是**跑 `appendVMISemanticPipeline`（`ptoas.cpp:3291`，序列见 5.2.3）：剩下的 `pto.vmi.*` 经 layout 赋值与 `VMIToVPTO` 变成物理 VPTO；已经是 `pto.vadd` 的基本空转。
+4. `prepareVPTOForEmission`（`ptoas.cpp:3292`）做发射前合法性检查（含 `PTOValidateVPTOEmissionIR`）。
+
+**tile 级不会降到 VMI。** 仓库里没有 `PTOToVMI` 一类 pass。A5 vpto 上 `pto.tadd` 经 `ExpandTileOp` **直接**变成物理 VPTO 微指令，再跑 VMI 管线时对已有 `pto.vadd` 基本空转。模板证据：`lib/TileOps/a5/tadd.py:16-17` 调 `pto.vadd`，不是 `pto.vmi.vadd`；`pto.vadd` 发的是 `_pto.VaddOp`（`ptodsl/ptodsl/_ops.py:1906-1916`）。另外两条路同样不经过 VMI：emitc 把 `tadd` 译成 `TADD(...)`；A2/A3 vpto 走 `pto.ub.vadd` 并跳过 `ExpandTileOp`（`ptoas.cpp:3157-3163`）。
+
+外层 `tload` / 内层手写 `pto.vmi.vadd` 可以出现在同一份 `.pto` 里——那是**作者混写**，不是编译器把 tile 降到 VMI。要进 VMI 必须自己发 `pto.vmi.*`，或走 PTODSL 的 `pto.vmi` API。
+
+因此一份文件完全可以：**外层 tile 算子 + 内层手写 VMI + 已经是 VPTO 的 helper**。它们在 vpto 后端汇合成同一套物理 VPTO，再发射。EmitC 路径没有上述展开 / VMI 管线，消费面只覆盖 tile 级 PTO（见下表与 5.1）。
+
+**签名约定。** `README.md:278-280` 写明：VPTO backend 总是启用 VMI → VPTO 语义 pipeline；**public function signature 不能直接暴露 `!pto.vmi.*` 类型**。入口用 `!pto.ptr` / tile / 标量；VMI 类型放在函数体或 private helper 里。`test/lit/vmi_new/vmi_ptoas_cli_pipeline.pto:14-22` 即此形态：参数是 `f32` + `!pto.ptr<f32, ub>`，体内才是 `pto.vmi.vbrc` / `pto.vmi.vstore`，`--emit-vpto` 之后变成 `pto.vdup` / `pto.vsts`，不再出现 `pto.vmi.`。手写 `.pto` 一般写 **不带 layout 的 surface VMI**（`PTOValidateVMIIR` 在 layout 前校验，`ptoas.cpp:3314`）；带 `#pto.vmi.layout<…>` 的形态是 layout 赋值之后的中间 IR，不是常规作者输入。
+
+**输出形态（对作者选后端而言）。** 哪一层能走哪条 `--pto-backend`：
+
+| `.pto` 里主要是什么 | `--pto-backend=emitc` | `--pto-backend=vpto` |
+| --- | --- | --- |
+| Tile 级：`pto.tadd` / `tload` / `alloc_tile` … | **能。** `PTOToEmitC` 把 `pto.tadd` 降成 `TADD(...)`（`lib/PTO/Transforms/PTOToEmitC.cpp:6877-6880`）；类型转换认 `TileBufType`（`PTOToEmitC.cpp:1020`）。**不读 `lib/TileOps`。** | **能（A5）。** `ExpandTileOp` 用 TileOps 展开再变 VPTO。A2/A3 跳过展开（`ptoas.cpp:3157-3163`），tile-native 端到端见 6.5。 |
+| VMI：`pto.vmi.*` / `!pto.vmi.vreg` | **不能。** `PTOToEmitC.cpp` 检索 `vmi` / `VaddOp` / `VldsOp` 零命中；没有 VMI 类型转换。会剩下未转换 op，`EmitPTOManualPass` 失败。 | **能，而且是这条后端的本职。** 语义管线始终启用（`ptoas.cpp:3291`）。 |
+| VPTO 微指令：`pto.vadd` / `pto.vlds` / `pto.vecscope` | **不能。** EmitC 降的是 `pto.tadd` 这种 tile op，没有物理 `VaddOp` pattern。 | **能。** 视为已经接近发射形态，经校验后进 LLVM / fatobj。 |
+
+经验规则：**EmitC = tile 级 PTO → C++ / pto-isa**；**VPTO = tile（A5 展开）+ VMI + 已有物理微指令 → 设备对象**。VMI 与 VPTO 微指令都只在 vpto 路上。默认 `--pto-backend=emitc`；文件里写了 VMI / `pto.vadd` 时必须显式 `--pto-backend=vpto`。查阅表见第 6 章 6.6；VPTO 管线细节见 5.2。各层**能表达什么**（硬件覆盖、类型、算子族）见下一节 3.2.2。
+
+实际该怎么写 `.pto`：
+
+1. **只写 tile 算子**（`test/lit/pto/`、TileLang 产出）：emitc、vpto（A5）都可以；emitc 出 C++，vpto 出 fatobj。
+2. **只写 VMI**（`test/lit/vmi_new/`）：必须 vpto。入口用 ptr / 标量，体内 `pto.vmi.*`。
+3. **只写物理 VPTO**（`pto.vecscope` + `pto.vadd`）：必须 vpto；VMI 管线几乎不改这些 op。
+4. **混写**：可以，但要清楚汇合点——tile 先被展开成 VPTO 微指令，VMI 再被降成 VPTO 微指令。不要指望 emitc 消化 VMI 或 `pto.vadd`。
+
+### 3.2.2 三层 IR 的支持范围
+
+3.2.1 回答「一份文件里能不能混、走哪条后端」。本节回答 **每一层能表达什么、明确不覆盖什么**。三层都是同一个 `pto` dialect 里的 IR（ODS 装配见 3.2.1），但不是同一套算子换前缀，而是三种粒度的编程合同。逐 op 语义以手册为准：tile 级见 `docs/PTO_IR_manual.md`，VMI 见 `docs/isa/vmi-isa/`，VPTO 微指令见 `docs/vpto-spec.md`。能力速查表见 6.7。
+
+**一句话对照。**
+
+| 维度 | Tile 级 PTO | VMI | VPTO 微指令 |
+| --- | --- | --- | --- |
+| 工作单元 | 二维 `!pto.tile_buf`（rows×cols，DPS） | 一维逻辑向量 `!pto.vmi.vreg<N×T>` | 一条 256B 物理 `!pto.vreg<N×T>` |
+| 作者要管什么 | tile 形状、valid、layout、本地缓冲地址 | 逻辑 lane 数与 elementwise 意图 | 物理寄存器、mask 粒度、`dist` / `part`、`vecscope` |
+| 硬件覆盖 | Vector **+ Cube + MTE/DMA + 核间 pipe / 通信** | **仅 Vector 管线 + UB load/store** | Vector **+ Cube + MTE + SIMT + 同步** |
+| 目标规格 | A2 / A3 / A5（路径不同） | 按 A5 向量管线建模 | 规格以 A5 为中心；A2/A3 另有 `pto.ub.*` |
+| 后端 | emitc **和** vpto（A5） | **只能 vpto** | **只能 vpto** |
+
+ODS 里「有这个 op」不等于这条路径能 lowering：tile 看 TileOps 模板或 EmitC pattern；VMI 看 `VMIToVPTO` 的 shape / layout 检查；VPTO 看 `PTOValidateVPTOEmissionIR`。
+
+#### Tile 级：二维 tile 上的 nano-kernel
+
+**合同。** `docs/PTO_IR_manual.md:14-22` 的 Level-2/3：tile 是带寿命的缓冲，不是纯 SSA。标记接口是 `TileOpInterface`（`include/PTO/IR/PTOInterfaces.td:43-47`）。核心类型 `!pto.tile_buf<loc, dtype, rows, cols, …>` 的 `loc` 覆盖存储层次：`vec`（UB）/ `mat`（L1）/ `left`（L0A）/ `right`（L0B）/ `acc`（L0C）/ `bias`（`PTO_IR_manual.md:149-164`，枚举 `include/PTO/IR/PTOAttrs.td:48-54`）。外加 `tensor_view` / `partition_view` 描述 GM 上的全局张量切片。
+
+**算子族。** `PTO_TOp` 在 `include/PTO/IR/PTOOps.td` 中约 100 条 `t*`（例如 `TAddOp` 在 `PTOOps.td:3405`）。手册分类汇总约 113 个公开 op（含指针/同步等非 `t*` 骨架，`PTO_IR_manual.md:10783-10808`）。计算侧大致是：
+
+- **搬运：** `tload` / `tstore` / `tprefetch` / `tmov` / `ttrans`
+- **逐元素：** `tadd` / `tsub` / `tmul` / `tdiv` 及 `tadds` 等标量变体、`tabs` / `tneg` / `texp` / `tlog` / `trelu` / `tlrelu` / `tprelu`、位运算、移位、`tcvt`、`tcmp`
+- **按行 / 列：** `trowsum` / `tcolmax` / `trowexpandadd` / `tcolexpand` 等（2D 归约与广播；VMI 没有「行 / 列」这个轴）
+- **Cube：** `tmatmul` / `tgemv` 及 `.acc` / `.bias` / `.mx`
+- **索引与乱序：** `tgather` / `tgatherb` / `tscatter`、`thistogram`、`tmrgsort` / `tsort32`
+- **量化：** `tquant` / `tquant.mx` / `tdequant`
+- **CV 双核：** `tpush` / `tpop` / `talloc` / `tfree` 以及 `*_to_aiv` / `*_from_aic`
+- **通信：** `comm.tput` / `tget` / `tbroadcast` / `treduce` 等
+
+周围还有非 `t*` 骨架：`alloc_tile`、`make_tensor_view`、`set_flag` / `get_buf`、标量 `load_scalar`。这些三层都会用，不算某一层的专属表面。
+
+**真正能编过的范围比 ODS 更窄：**
+
+| 路径 | 实际覆盖 |
+| --- | --- |
+| **emitc**（A2/A3/A5） | `PTOToEmitC` 把 `pto.tadd` 等直接译成 pto-isa 的 `TADD(...)`（`PTOToEmitC.cpp:6877-6880`）。**不读 TileOps。** A2/A3 的主战场。 |
+| **vpto + A5** | `ExpandTileOp` 用 `lib/TileOps/a5/`（约 110 个模板，**目录只有 a5**）展开成物理 VPTO（`Passes.td:564-571`）。 |
+| **vpto + A2/A3** | **不展开 TileOps**（`ptoas.cpp:3157-3163`）。`LowerPTOToUBufOps` 把一部分 eltwise 打成 `pto.ub.vadd` 等（文件头写明 `tadd/tsub/tmul/tdiv`，`lib/PTO/Transforms/LowerPTOToUBufOps.cpp:9-12`；UB 微指令还含 max/min/exp/gather，`include/PTO/IR/VPTOUbOps.td:60-68`）。复杂 tile（matmul、row/col、sort）在这条路上 **没有** A5 那种模板展开；端到见 6.5。 |
+
+三条路径都 **没有** tile → VMI：A5 vpto 跳过 VMI 直接到物理微指令；emitc 到 C++；A2/A3 到 `pto.ub.*`。
+
+**Tile 做不到、要下沉的：** 任意长度逻辑 SIMD（`128xf32` 跨两个物理寄存器）、物理 `part=EVEN/ODD`、SIMT 线程模型、手写 `vecscope` 里的流水线微指令。要这些语义必须**自己写** VMI 或 VPTO 微指令，编译器不会从 `pto.tadd` 生成 `pto.vmi.vadd`。
+
+#### VMI：逻辑向量，只覆盖 Vector
+
+**合同。** 对 `N` 个 lane 做 elementwise，不暴露 256B 切分。`K = ⌈N·bitwidth(T)/2048⌉` 条物理 vreg 由 layout assignment 决定（`docs/isa/vmi-isa/00-architecture-overview.md:34-45`）。这是 VMI 存在的理由：例如 `!pto.vmi.vreg<128xf32>` 是 2 个物理寄存器；`ui8` histogram 逻辑结果 `256×ui16`，硬件一次只能吐 `128×ui16`（`docs/designs/vmi-introduction.md:14-17`）。
+
+**公开统一表面（作者该写的）约 55 条**（`docs/isa/vmi-isa/10-appendices.md:7-64`）：
+
+- Load/store：`vload` / `vstore` / `vsstb`（**UB ptr**，不是 GM DMA）
+- Eltwise：`vadd` / `vmul` / `vdiv`（仅 fp）/ `vmax` / `vand` / … 及 `vadds` 等 vec-scalar
+- Compare/select：`vcmp` / `vsel` / `vselr`
+- Reduce/broadcast：`vcadd` / `vcmax` / `vcmin`、`vbrc`（可带 `{group=C}`）
+- Convert：`vcvt`、`vinterpret_cast`
+- SFU：`vexpdif` / `vaxpy` / `vlrelu` / `vprelu` / `vmull` / `vmula` / histogram / `vgather*` / `vscatter`
+- Predicate：`create_mask` / `pset` / `plt`
+- Rearrange：`vintlv` / `vdintlv`
+
+ODS 里还有一大坨 **legacy / 内部**（`pto.vmi.addf`、`load`、`ensure_layout`…，`include/PTO/IR/VMIOps.td` 前半）。那是 lowering 中间态，不是 PTODSL 公开 API（`ptodsl/docs/user_guide/14-vmi-virtual-instruction-set.md:17-20`）。
+
+**类型范围（公开表面，`00-architecture-overview.md:66-68`）：**
+
+| T | 合法逻辑 L（文档） |
+| --- | --- |
+| f32 / i32 族 | 1, 2, 4, 8, 64, 128, 256 |
+| f16 / bf16 / i16 族 | 同上 |
+| i8 / fp8 族 | 同上 |
+
+PTODSL 还要求 `lanes` 为 64 的倍数（`ptodsl/docs/user_guide/14-vmi-virtual-instruction-set.md:48-49`）。内部 IR 可能接受其它正数 L，那不是对外类型构造选项。
+
+**明确不在 VMI 范围：**
+
+- **Cube**（没有 `mad` / L0）
+- **SIMT**
+- **GM↔UB DMA**（`mte_gm_ub`）；只有 `!pto.ptr<T, ub>` 上的向量 load/store
+- **二维 tile / 行列表义**（没有 `trowsum`）
+- **核间通信、CV pipe**
+- **EmitC**
+- A5 上 `vload` **不能带 mask**；MERGE predication 是编译器模拟，不是硬件原生（`00-architecture-overview.md:140-148`）
+
+#### VPTO 微指令：物理 ISA，覆盖最全
+
+**合同。** 一条指令 = 一条（或明确的 x2）256B 物理寄存器。`N * bitwidth(T) = 2048`（`docs/vpto-spec.md:879-890`）。mask 必须是 `b8` / `b16` / `b32`，并与元素宽度对齐。作者要写 `pto.vecscope`、`dist`、`part` 等硬件可见细节。
+
+**规格分组（`docs/vpto-spec.md:1317-1338`，A5）：**
+
+| 组 | 代表 | 大约条数 |
+| --- | --- | --- |
+| Pipeline sync | `set_flag` / `get_buf` / `rls_buf` | 5 |
+| DMA | `mte_gm_ub` / `mte_ub_gm` / `mte_ub_l1`… | 4+ |
+| Vector ld/st | `vlds` / `vsts` / `vgather2` / `vscatter` | ~23 |
+| Predicate | `plds` / `pset_b*` / `pnot` | ~25 |
+| Unary / binary / vec-scalar | `vadd` / `vexp` / `vadds` | ~30 |
+| Convert / reduce / cmp | `vcvt` / `vcadd` / `vcmp` | ~20 |
+| Rearrange | `vintlv` / `vdintlv`（`vintlvv2` **非 A5**） | 2 |
+| Cube | `mad` / `mad_mx` / `mte_l1_l0a` / FIXPIPE | 20 |
+| **SIMT** | `simt_launch` / `vote_*` / `atomic_*` / `syncthreads` | **~65** |
+| 标量查询 | `get_block_idx` / `addptr` / `ld_dev` | 10 |
+
+这是三层里 **唯一** 同时覆盖：物理向量、Cube 微指令、SIMT、以及完整 MTE 地址空间（gm / ub / l1 / l0）的一层。元素类型见 `vpto-spec.md:1442-1452`（i8–i64、f16 / bf16 / f32；i64 → 32 lane）。低精度 fp8 等更多出现在 tile / VMI 表面，VPTO 侧往往拆成具体 `vcvt` / `part`。
+
+**A2/A3：** 不是这套 A5 `pto.vadd` 为主。vpto 缩短路径产出 `pto.ub.vadd` 一类 UB 微指令（`VPTOUbOps.td`），march `dav-c220-vec`（`ptoas.cpp:3215-3217`）。**EmitC 不认** `pto.vadd` / `pto.vlds`。
+
+#### 重叠与选型
+
+同一件「向量加法」三层都能写，粒度完全不同：
+
+- Tile：`pto.tadd` 两个 `16×64xf32` tile（可能含 valid、padding）
+- VMI：`pto.vmi.vadd` 两条 `!pto.vmi.vreg<128xf32>`（编译器拆 EVEN/ODD）
+- VPTO：两条 `pto.vadd`，各吃一个 `!pto.vreg<64xf32>`，还要 mask / vecscope
+
+```text
+                    Cube / 2D tile / DMA tile / 通信
+                              ▲
+                              │  只有 Tile 级（+ VPTO cube 微指令）
+                              │
+     逻辑宽向量 / 跨寄存器 layout     物理 256B / SIMT / 显式 DMA
+              ▲                              ▲
+              │  只有 VMI                    │  只有 VPTO
+              │                              │
+              └──────── Vector eltwise ──────┘
+```
+
+选层：
+
+1. 要 **matmul / gemv / 行列表 / GM tile 搬运 / 双核 pipe** → 写 tile 级；A5 走 vpto+TileOps，A2/A3 走 emitc。
+2. 要 **逻辑长度 ≠ 一个物理寄存器**（f16→f32 拆 part、histogram 256 bin）→ 写 VMI，且必须 vpto。
+3. 要 **抠流水线、SIMT、手写 DMA/mad** → 写 VPTO 微指令。
+4. 只是 A5 上普通 eltwise、且能塞进一个 tile → tile 最省事；VMI 更接近「我按 N 个 lane 想」，VPTO 最接近硬件。
+
+不要指望「写 `pto.tadd` 就会自动变成 `pto.vmi.*`」。三层都是 PTO IR，但 lowering 是 tile → 物理 VPTO（或 EmitC / `pto.ub.*`），VMI 只消化作者写出的 `pto.vmi.*`（3.2.1）。
+
 ### 3.3 PTODSL：tracing 构建 PTO IR
 
 PTODSL 是本仓库自带、随根 `ptoas` wheel 一起发布的 Python DSL（`ptodsl/ptodsl/` 包，`ptodsl/README.md:13-33` 列了核心模块；顶层 `ptoas` Python 包本体在 `ptodsl/ptoas/`，由 `tools/ptoas/CMakeLists.txt:184-191` 装进 wheel）。它构造 PTO IR 的方式值得先立一个正确认知：**不是 AST 解释器，也不是 C++ JIT——是 tracing**：把用户的 Python 函数当成回调执行一遍，执行期间每个 DSL 调用直接在当前 `InsertionPoint` 发出对应的 MLIR op。一句话：Python 负责"编排"，MLIR builder 负责"落 IR"。
@@ -547,10 +747,10 @@ def template_tmatmul(lhs: pto.Tile, rhs: pto.Tile, acc: pto.Tile):
 ### 3.8 小结（前端选择建议）
 
 - **写新 kernel**：默认 PTODSL（`@pto.jit`），签名类型注解即 ABI，自动享 specialization 缓存与 `~/.cache/ptodsl/` 原生库缓存；控制流要求超出 DSL 表达力时再降级到 PyPTO 裸绑定（参考 `ptodsl/examples/tadd_lowlevel.py` 与 `test/samples/MatMul/tmatmulk.py`）。
-- **手写/修改 IR 做实验**：直接写 `.pto` 文本跑 lit（`test/lit/pto/` 有 700+ 现成用例可作语法参考），或用 `tools/ptobc` CLI 探二进制形态。
+- **手写/修改 IR 做实验**：直接写 `.pto` 文本跑 lit（`test/lit/pto/` 有 700+ 现成用例可作语法参考），或用 `tools/ptobc` CLI 探二进制形态。选后端前先认清文件里是 tile / VMI / VPTO 微指令中的哪一层（或混写），对照 3.2.1 / 6.6：VMI 与 `pto.vadd` 只能走 `--pto-backend=vpto`。选层（要不要 cube / 逻辑宽向量 / SIMT）对照 3.2.2 / 6.7。
 - **验证新 tile 算子的端到端行为**：在 `test/tilelang_st/npu/a5/src/st/smoke/testcase/CMakeLists.txt:116-205` 注册新用例，三步 CMake 流水自动覆盖"编译→链接→跑数"。
 - **扩充算子模板**：`lib/TileOps/a5/` 加模板文件并声明元数据，`lib/SoftOps/` 放标量软实现；pass 侧无需改动。
-- 所有前端殊途同归：产出 PTO IR `ModuleOp`（或其文本/二进制序列化）后，统一进入第 4 章的公共编译阶段。
+- 所有前端殊途同归：产出 PTO IR `ModuleOp`（或其文本/二进制序列化）后，统一进入第 4 章的公共编译阶段。同一 `ModuleOp` 里可以混有 3.2.1 的三层 op，分叉发生在第 5 章，不在解析器。
 
 ## 4. 公共阶段（解析/验证、Pass 管线编排、level 分档）
 
@@ -751,11 +951,13 @@ module {
 
 ## 5. 后端分叉（5.1 EmitC 路径 / 5.2 VPTO 路径含 VMI 层 / 5.3 mix-backend）
 
-第 4 章把共享主管线写到 `tools/ptoas/ptoas.cpp:3794` 的 emitc / vpto 分叉；分叉图与 job 编排见 1.4 / 2.4。本章从该分叉点写起，把两条后端的 lowering 与发射走完。铁律不变：**`--pto-backend` 只接受 `emitc|vpto`**（`tools/ptoas/ptoas.h:44`，解析 `tools/ptoas/driver.cpp:278`）。VMI 是 VPTO 路径**内部的 IR 层**，不是第三条 CLI 后端；mix-backend 是「子模块各自走 emitc 或 vpto、再把 fatobj 链在一起」的组合模式，也不是第三后端。
+第 4 章把共享主管线写到 `tools/ptoas/ptoas.cpp:3794` 的 emitc / vpto 分叉；分叉图与 job 编排见 1.4 / 2.4。本章从该分叉点写起，把两条后端的 lowering 与发射走完。铁律不变：**`--pto-backend` 只接受 `emitc|vpto`**（`tools/ptoas/ptoas.h:44`，解析 `tools/ptoas/driver.cpp:278`）。VMI 是 VPTO 路径**内部的 IR 层**，不是第三条 CLI 后端；mix-backend 是「子模块各自走 emitc 或 vpto、再把 fatobj 链在一起」的组合模式，也不是第三后端。一份 `.pto` 里可以同时出现 tile 级 PTO、VMI、VPTO 微指令，哪一层能喂哪条后端见 3.2.1 / 6.6，各层支持范围见 3.2.2 / 6.7。
 
 ### 5.1 EmitC 路径
 
 **输入 IR 形态。** 共享 `pm` 跑完后仍是 PTO dialect：tile alloc 已带物理地址，`multi_tile_get` 已展开（见 4.8）。分叉前再做一次 seam IR dump（`tools/ptoas/ptoas.cpp:3823-3828`），然后对 provenance location 做两次收窄（`narrowUnusedMultiResultProvenanceLocs` / `splitDerivedSingleResultProvenanceLocs`，`tools/ptoas/ptoas.cpp:3830-3831`），才进入 EmitC 专属管线。
+
+EmitC **只消化 tile 级 PTO**。`PTOToEmitCTypeConverter` 转换 `TileBufType` / `TensorViewType`（`lib/PTO/Transforms/PTOToEmitC.cpp:1010-1024`），pattern 把 `pto.tadd` 写成 `TADD(...)`（`PTOToEmitC.cpp:6877-6880`）。同一文件里 **没有** `vmi`、`VaddOp`、`VldsOp` 的 conversion。手写 `pto.vmi.*` 或物理 `pto.vadd` / `pto.vlds` 喂默认 emitc 会在 `EmitPTOManualPass`（`PTOToEmitC.cpp:13701`）留下未转换 op 而失败——这类输入必须走 5.2。三层对照表见 3.2.1 / 6.6。
 
 最简输入仍是 `test/lit/pto/empty_func.pto`——空 `func.func @hello`，默认 `--pto-backend=emitc`，FileCheck 盯生成的 `AICORE void hello()`。带 tile 的输入例如 `test/lit/pto/tmrgsort_format2_subview_valid_cols.pto`，FileCheck 要求产物含 `#include "pto/pto-inst.hpp"`。
 
@@ -834,7 +1036,9 @@ module attributes {pto.target_arch = "a5"} {
 
 `RUN` 行是 `ptoas --pto-arch=a5 --pto-backend=vpto --emit-vpto`；FileCheck 要求出口变成 `pto.vdup` / `pto.vsts`，且 **不再出现** `pto.vmi.` / `!pto.vmi.`。更完整的 kernel 形态见 `test/vpto/cases/vmi_new/mask-select-store/kernel.pto:44-57`：在 `pto.vecscope` 里 `vload` → `create_mask` → `vadd` → `vsel` → `vstore`。
 
-Tile 级 `pto.tadd` 等并不手写 VMI：它们先在 `lowerPTOToVPTOBackend`（`tools/ptoas/ptoas.cpp:3149`）里经 `ExpandTileOp`（`tools/ptoas/ptoas.cpp:3166`）展开成模板函数体，模板内部才落到 VMI / VPTO。A2/A3 在 `LowerPTOToUBufOps` 之后提前 `return`（`tools/ptoas/ptoas.cpp:3157-3163`），不走 TileOp 展开与后续 A5 融合收尾。
+第三种入口是 **已经手写的物理 VPTO 微指令**（`pto.vadd` / `pto.vlds` / `pto.vecscope`）。VMI 语义管线对它们基本空转，随后 `prepareVPTOForEmission` 按发射契约校验。
+
+Tile 级 `pto.tadd` 等并不手写 VMI：它们先在 `lowerPTOToVPTOBackend`（`tools/ptoas/ptoas.cpp:3149`）里经 `ExpandTileOp`（`tools/ptoas/ptoas.cpp:3166`）展开成模板函数体。模板内部是 **物理 VPTO 微指令**（`pto.vecscope`、`pto.vlds`、`pto.vadd`、`pto.vsts`，`include/PTO/Transforms/Passes.td:564-571`），不是 `pto.vmi.*`。A2/A3 在 `LowerPTOToUBufOps` 之后提前 `return`（`tools/ptoas/ptoas.cpp:3157-3163`），不走 TileOp 展开与后续 A5 融合收尾。一份 `.pto` 混有这三层时的汇合顺序见 3.2.1。
 
 #### 5.2.2 `runVPTOBackendPipeline` 骨架
 
@@ -848,6 +1052,8 @@ Tile 级 `pto.tadd` 等并不手写 VMI：它们先在 `lowerPTOToVPTOBackend`�
 4. nest 到 kernel `ModuleOp`：先给 `pto.simt_entry` 物化 `no_inline`（`ApplySIMTEntryNoInlinePass`，定义 `tools/ptoas/ptoas.cpp:163`，装入 `ptoas.cpp:3289`），再 `Inliner`（`ptoas.cpp:3290`），让 private helper 参与同一次 layout 决策。
 5. **`appendVMISemanticPipeline`**（`tools/ptoas/ptoas.cpp:3291`，实现 `tools/ptoas/ptoas.cpp:3303-3338`）——VMI → VPTO 的固定语义管线，始终启用。
 6. `prepareVPTOForEmission`（`tools/ptoas/ptoas.cpp:3292`，实现 `tools/ptoas/ptoas.cpp:3093-3147`）：同步合法化、循环展开、SIMT 物化、指针规范化、SoftLib 展开等发射前收尾。
+
+同一模块里若混有 tile / VMI / 已有物理微指令：第 3 步先把 tile 展开成 VPTO 微指令，第 5 步再把残留 `pto.vmi.*` 降成 VPTO 微指令，第 6 步看到的已经是统一的物理 VPTO。作者侧对照表见 3.2.1。
 
 **A5 scheduler 的插入点。** `--vpto-scheduler` 不进共享 `pm`（见 4.7）。它在 `prepareVPTOForEmission` 尾段、`PTOExpandSoftLib` / inline / Canonicalizer / CSE **之后**、`VPTOCombineReductions` 与 `PTOValidateVPTOEmissionIR` **之前**才装入（`tools/ptoas/ptoas.cpp:3137-3146`）。模式 `analyze|on` 映射到 `createVPTOSchedulerPass` 的 `"analyze"` / `"on"`（`tools/ptoas/ptoas.cpp:3138-3142`）；非 A5 在主管线入口就被拒绝（`tools/ptoas/ptoas.cpp:3399-3402`）。
 
@@ -1000,7 +1206,7 @@ bisheng --cce-fatobj-link --cce-aicore-arch=dav-c310 -r -o <output> <fatobj>...
 
 ## 6. 路径对比总表（arch × backend × level 矩阵）
 
-本章是查阅表，不复述管线。选项定义与默认值见第 2 章 2.5；level / 同步 / A5 入口检查见第 4 章 4.5–4.7；emitc / vpto / mix 的 lowering 与发射见第 5 章。这里只回答三件事：**哪组 `arch × backend × level` 能走进 `compilePTOASModule`、可选 flag 在哪种 arch 上会被硬拒绝、默认产物是什么。**
+本章是查阅表，不复述管线。选项定义与默认值见第 2 章 2.5；level / 同步 / A5 入口检查见第 4 章 4.5–4.7；emitc / vpto / mix 的 lowering 与发射见第 5 章；一份 `.pto` 里三层 IR 的写法见 3.2.1，各层支持范围见 3.2.2。这里只回答五件事：**哪组 `arch × backend × level` 能走进 `compilePTOASModule`、可选 flag 在哪种 arch 上会被硬拒绝、默认产物是什么、哪一层输入 IR 能喂哪条后端、三层各覆盖哪些硬件能力。**
 
 判定口径（贯穿 6.2 / 6.3）：
 
@@ -1098,6 +1304,40 @@ mix 模式下每个 child 用自己的 `pto.backend`（可被 CLI 覆盖）独�
 > **待确认：** `--vpto-scheduler=analyze|on` 配 `--pto-backend=emitc --pto-arch=a5` 是否应当报错。现状是入口只检查 arch（`ptoas.cpp:3399-3402`），Pass 只在 VPTO 的 `prepareVPTOForEmission` 插入（`ptoas.cpp:3137-3143`），因此 emitc 路径会 **静默忽略** 该 flag。这与 `--emit-vpto` 在非 vpto 上硬错误（`ptoas.cpp:3382-3388`）不一致；是否为有意设计，本文不臆造。
 
 上板、pto-isa 头文件探测、npu_validation 是否覆盖全部 18 格，属于第 7 章，不在本表用 ❌ 提前下结论。
+
+### 6.6 IR 层 × 后端
+
+6.2 问的是 arch × backend × level 能不能进管线；本表问的是 **输入 `.pto` 里主要是哪一层 IR**。解析器不按层分派（`parseTextualModule`，`tools/ptoas/driver.cpp:187`）；分叉只看 `--pto-backend`。写法与汇合顺序见 3.2.1，各层能表达什么见 3.2.2 / 6.7，EmitC / VPTO 消费面见 5.1 / 5.2。
+
+| 输入 IR 层 | emitc | vpto（A5） | vpto（A2/A3） |
+| --- | --- | --- | --- |
+| Tile 级 PTO（`pto.tadd` / `!pto.tile_buf`） | ✅ `PTOToEmitC` → C++（`PTOToEmitC.cpp:6877`） | ✅ `ExpandTileOp` → 物理 VPTO（`ptoas.cpp:3166`，`Passes.td:564-571`） | ⚠️ 跳过 `ExpandTileOp`（`ptoas.cpp:3157-3163`）；tile-native 端到端见 6.5 |
+| VMI（`pto.vmi.*` / `!pto.vmi.vreg`） | ❌ 无类型转换、无 pattern | ✅ `appendVMISemanticPipeline` 始终启用（`ptoas.cpp:3291`） | ✅ 无待展开 tile 时走快路径（`ptoas.cpp:3609-3619`），同样跑 VMI 管线 |
+| VPTO 微指令（`pto.vadd` / `pto.vlds` / `pto.vecscope`） | ❌ 无 `VaddOp` / `VldsOp` pattern | ✅ 接近发射形态，经 `PTOValidateVPTOEmissionIR` | ✅ 与手写低层对齐 |
+
+混写时 vpto 侧先把 **tile 展开成物理 VPTO 微指令**、再把 **残留的手写 `pto.vmi.*`** 降成物理 VPTO，最后校验（`ptoas.cpp:3280-3292`）。tile **不会**经过 VMI（3.2.1）。emitc 侧没有这套汇合，混进 VMI 或 `pto.vadd` 会在 `EmitPTOManualPass` 失败。kernel 对外签名不要带 `!pto.vmi.*`（`README.md:278-280`）。三层都是同一个 `pto` dialect。
+
+### 6.7 三层能力速查
+
+6.6 问「喂哪条后端」；本表问 **这一层能不能表达这类程序**。叙述与选型见 3.2.2，不在这里复述算子清单。
+
+| 能力 | Tile 级 PTO | VMI | VPTO 微指令 |
+| --- | --- | --- | --- |
+| Vector eltwise（add / mul / exp …） | ✅ 二维 tile | ✅ 逻辑 `N×T` | ✅ 物理 256B vreg |
+| 逻辑宽度跨多个物理寄存器 | ❌ 自己切 tile | ✅ layout 1:N | ❌ 作者手拆 `part` |
+| 二维行 / 列归约与广播 | ✅ `trow*` / `tcol*` | ❌ | ❌（须先展开） |
+| Cube（matmul / gemv / L0） | ✅ `tmatmul` / `tgemv` | ❌ | ✅ `mad` / `mte_l1_l0*` |
+| GM tile DMA（`tload` / `tstore`） | ✅ | ❌（仅 UB `vload`/`vstore`） | ✅ `mte_gm_ub` 等 |
+| SIMT | ❌ | ❌ | ✅ ~65 ops |
+| 核间通信 / CV pipe | ✅ `comm.*` / `tpush` | ❌ | 部分同步微指令，不是 tile 通信表面 |
+| A5 + emitc | ✅ | ❌ | ❌ |
+| A5 + vpto | ✅ TileOps 展开 | ✅ 语义管线 | ✅ |
+| A2/A3 + emitc | ✅ 主战场 | ❌ | ❌ |
+| A2/A3 + vpto | ⚠️ 仅部分 eltwise → `pto.ub.*`（6.5） | ✅ 快路径 | ✅ `pto.ub.*` / 手写低层 |
+| 自动降到 VMI | ❌ 无 `PTOToVMI`；A5 直接到 `pto.vadd` | — | — |
+| 同属 `pto` dialect | ✅ | ✅ | ✅ |
+
+同一件向量加法三层都能写，粒度不同：tile 是两个 `tile_buf`，VMI 是 `!pto.vmi.vreg<128xf32>`，VPTO 是带 mask 的 `!pto.vreg<64xf32>`。选层口诀见 3.2.2 末。三层都是 PTO IR；`--pto-backend=vpto` 是后端名，不是第四种 IR。
 
 ## 7. 运行时与上板（pto-isa 调用、npu_validation、fatobj 链接）
 
@@ -1459,7 +1699,7 @@ CMake 组装 CLI 字符串的顺序（`CMakeLists.txt:95-108`）：
 4. **第 5 章**：从 `tools/ptoas/ptoas.cpp:3794` 的 emitc / vpto 分叉读起，把 5.1 / 5.2 / 5.3 的产物形态对上 9.2 的定位卡。
 5. **`test/vpto` 案例**：先看单 vpto 的 `test/vpto/cases/vmi_new/mask-select-store/`（`ptoas.flags` 为 `--pto-arch a5 --pto-backend=vpto`），再看 mix 的 `test/vpto/cases/micro-op/backend/mixed-external-vadd/`（flags **故意不写** `--pto-backend`，见 7.3）。目录约定与 SIM / NPU 跑法见第 7 章 7.3。
 
-第 3、4、6、8 章按需回查即可：写 kernel 时读第 3 章，查 Pass 装入条件读第 4 章与附录 A，查 arch × backend × level 读第 6 章，发版读第 8 章。
+第 3、4、6、8 章按需回查即可：写 kernel 时读第 3 章（`.pto` 里三层 IR 对照 3.2.1，支持范围对照 3.2.2），查 Pass 装入条件读第 4 章与附录 A，查 arch × backend × level 或 IR 层 × 后端读第 6 章（含 6.6 / 6.7），发版读第 8 章。
 
 ### 9.2 三条路径定位卡（入口 / 分叉 / 产物）
 
@@ -1497,6 +1737,8 @@ CMake 组装 CLI 字符串的顺序（`CMakeLists.txt:95-108`）：
 
 - **默认就是 emitc。** 不加 `--pto-backend` 的单模块 `.pto` 走 9.2 第一行，不是 vpto。
 - **vpto 默认产物是 fatobj，不是 VPTO 文本。** 想看 IR 必须加 `--emit-vpto`；想看 `.ll` 加 `--emit-vpto-llvm-ir`。这两个开关在 emitc 上会报错（`ptoas.cpp:3382-3388`）。
+- **VMI 和物理 `pto.vadd` 不能喂默认 emitc。** 文件里出现 `pto.vmi.*` / `!pto.vmi.vreg` 或 `pto.vlds` / `pto.vecscope` 时必须 `--pto-backend=vpto`（3.2.1 / 6.6）。`test/lit/vmi_new/vmi_ptoas_cli_pipeline.pto` 的 `RUN` 行就是这个开关组合。
+- **tile 不会自动变成 VMI。** `pto.tadd` 在 A5 vpto 上展开成 `pto.vadd`（TileOps），不是 `pto.vmi.vadd`。三层都是 `pto` dialect，但没有 `PTOToVMI` pass（3.2.1）。
 - **mix 靠模块布局，不靠第三个 backend 名。** 外层只含子 `module`、且子模块带不同 `pto.backend` 时，driver 才进 mix。PTODSL `@pto.jit` 默认产出这种容器（第 3 章）；手写 IR 可参考 `test/lit/vpto/backend_mixed_requires_output_file.pto:11-26`。
 - **查 Pass 先看会不会跑。** `Passes.td` 里有定义不等于主管线会装入（例如 `PTOVerifyTFree` 在 `ptoas.cpp:3639` 被注释掉）。装入顺序以第 4 章 4.3 与第 5 章 5.2.3 为准，附录 A 只做检索。
 
@@ -1584,9 +1826,9 @@ CMake 组装 CLI 字符串的顺序（`CMakeLists.txt:95-108`）：
 
 | 术语 | 含义 |
 | --- | --- |
-| **PTO** | 本仓库的核心 IR 方言（`pto.*` op / 类型）。前端产出 PTO IR `ModuleOp` 后进入公共编译阶段。语义手册见 `docs/PTO_IR_manual.md`。 |
-| **VMI** | Virtual Machine ISA：VPTO 后端**内部的**向量语义 IR 层（`pto.vmi.*`、`!pto.vmi.vreg` / `!pto.vmi.mask`），不是 CLI 第三后端。经 `appendVMISemanticPipeline` 降到物理 VPTO。概念见 `docs/designs/vmi-introduction.md`。 |
-| **VPTO** | 物理向量/矩阵 IR 层（`pto.vdup` / `pto.vlds` / `pto.vsts` 等，类型 `!pto.vreg` / `!pto.mask`），也是 `--pto-backend=vpto` 这条后端路径的名字。规格见 `docs/vpto-spec.md`。 |
+| **PTO** | 本仓库**唯一**的核心 IR 方言（`pto.*`）。tile 级、VMI、VPTO 微指令都是这个 dialect 里的层，不是三个 dialect（ODS：`PTOOps.td` include `VMIOps.td` / `VPTOOps.td`，见 3.2.1）。各层支持范围见 3.2.2 / 6.7。语义手册见 `docs/PTO_IR_manual.md`。 |
+| **VMI** | Virtual Machine ISA：VPTO 后端**内部的**向量语义 IR 层（`pto.vmi.*`、`!pto.vmi.vreg` / `!pto.vmi.mask`），不是 CLI 第三后端。只覆盖 Vector + UB load/store，经 `appendVMISemanticPipeline` 降到物理 VPTO。概念见 `docs/designs/vmi-introduction.md`。 |
+| **VPTO** | 两层含义：① **微指令 IR**（`pto.vdup` / `pto.vlds` / `pto.vsts` 等，类型 `!pto.vreg` / `!pto.mask`），覆盖向量、Cube、SIMT、MTE；② **CLI 后端** `--pto-backend=vpto`。规格见 `docs/vpto-spec.md`。哪一层输入能喂哪条后端见 6.6。 |
 | **fatobj** | CANN 设备侧「胖对象」：把 host stub 与 cube/vector 设备目标码打进同一对象文件。vpto 单后端默认产物；mix 的最终产物也是一枚 fatobj。 |
 | **PTOBC** | PTO Bytecode：带魔数 `"PTOBC\0"` 的二进制模块格式，与 `.pto` 文本并列作为 `loadInputModule` 的输入（`tools/ptoas/driver.cpp:131-134`）。编解码在 `tools/ptobc/`。 |
 | **TileLib** | 编译期按需物化的 tile 级算子模板库（`lib/TileOps/`，PTODSL 编写）。`InsertTemplateAttributes` / `ExpandTileOp` 经 `TileLibService` 查询并展开。 |
