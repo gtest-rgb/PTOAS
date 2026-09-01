@@ -9,10 +9,12 @@
 
 **能不改的代码一律不改。** 迁移的改动面应收敛到"端侧确实不支持的点"：
 
-- 不影响的代码（如 `pypto.platform.npuarch == 'DAV_3510'` 分支——端侧求值恒为假、完全惰性）**保留原样**；
+- 不影响的代码尽量保留（见下方例外）；
 - 签名尽量不改（见第 4.1 节：`cu_seqlens` 保留在签名中，仅替换 kernel 内部三处值读取）；
 - 计算过程不动，dtype 只做类型替换（见第 3 节）；
 - tile 参数不替用户推导，只给差异事实（见第 5 节）。
+
+**复用原则的一个例外**：云侧的 `if pypto.platform.npuarch == 'DAV_3510': set_pass_options(sg_set_scope=...)` 分支原先依赖 `pypto.loop` 的符号执行保持惰性（端侧求值恒为假、永不生效）；改原生 `range` 后，`pypto.platform.npuarch` 与 Python `if` 都在 trace 期求值——若 `npuarch` 是运行期属性，分支反而会求值出错或语义改变。**这类"惰性平台分支"在循环表达迁移时需一并移除**，这是 `pypto.loop → range` 改动的连带成本。
 
 ## 1. 平台差异事实表
 
@@ -53,6 +55,9 @@
 | `q_start = cu_seqlens_q[b_idx]` 等值读取 | **删除**，替换为静态推导：`q_start = 0`、`q_end = seq_len_q`，其中 `seq_len_q = q.shape[1]`（或等价静态维） |
 | `seq_len_q.as_variable()` / `seq_len_k.as_variable()` | **删除**（连同其依赖的值读取） |
 | `q_tile_count = (seq_len_q + q_tile - 1) // q_tile` | 保留——`seq_len_q` 已是编译期常量，整式成为常量表达式 |
+| `for b_idx in pypto.loop(batch_size, name=...)` 四层循环 | **改为原生 `range`**——静态场景不支持 `pypto.loop`；静态 shape 下 `q.shape[0]`、tile_count 均为普通 Python int（`SymInt = Union[int, SymbolicScalar]`，静态维直接返回 int），`range()` 天然可用 |
+| `pypto.is_loop_begin(k_tile_idx)` / `pypto.is_loop_end(k_tile_idx)` | **改为整数比较** `k_tile_idx == 0` / `k_tile_idx == k_tile_count - 1`——`is_loop_begin/end` 要求 `pypto.loop` 产出的 SymbolicScalar 入参（否则 `raise FeError("not loop index")`），原生循环下不可用；整数比较在 trace 期直接求解 |
+| `pypto.min(q_tile_start + q_tile, seq_len_q)` 两处 | 改用 Python 内建 `min`（入参均为 int，`pypto.min` 返回 SymbolicScalar 反而破坏纯静态表达） |
 
 ### 2.4 padding 语义（静默出错风险）
 
@@ -151,7 +156,8 @@
 | V3 | `pypto.div` INTRINSIC 精度模式 FP16 行为 | 同上 |
 | V4 | jit 选项在 litenpu 的支持矩阵 | 删干净后在 SIM 下编译，观察是否有 unknown key 报错（反向验证"不支持"） |
 | V5 | `[pypto.STATIC]` 注解驱动 batch loop 在 pypto 前端的行为 | pypto_pro 的 shape policy 已有 UT 覆盖；pypto 前端用小用例验证 STATIC 烘入 |
-| V5b | `pypto.is_loop_begin/is_loop_end`（`k_tile_idx` 为静态常量循环） | 单 k_tile_count 场景验证三分支逻辑等价性 |
+| V5b | 原生 `range` 循环 + 整数比较分支的等价性 | SIM 下验证三分支（首/中/末 kv tile）与云侧 `is_loop_begin/end` 版本逻辑一致 |
+| V5c | `pypto.platform.npuarch` 在 trace 期的取值行为 | 决定惰性平台分支是"恒假安全"还是"求值出错"，验证移除决策的必要性 |
 | V6 | `assemble` 动态偏移替换后的写回正确性 | SIM 下比对输出张量 |
 | V7 | SIM 全链路 | 端侧草稿按 UT 惯例接 `RunMode.SIM` 跑通 |
 
